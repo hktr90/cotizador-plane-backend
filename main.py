@@ -103,13 +103,13 @@ def crear_proveedor(nombre: str = Form(...), contacto: Optional[str] = Form(None
 # -----------------------------------------------------------------------------
 # 2. CARGA Y EXTRACCIÓN DE CATÁLOGOS (PDF/Excel)
 # -----------------------------------------------------------------------------
-@app.post("/api/upload-catalogo")
+@app.post("/upload-catalog")
 async def procesar_catalogo(
-    proveedor_nombre: str = Form(...),
+    proveedor_nombre: Optional[str] = Form("Proveedor General"),
     file: UploadFile = File(...)
 ):
     """
-    Recibe un archivo PDF o Excel, extrae productos y precios base,
+    Recibe un archivo PDF o Excel desde la pantalla de Netlify, extrae productos y precios base,
     y guarda el inventario unificado en Supabase.
     """
     if not file.filename.endswith(('.pdf', '.xlsx', '.xls')):
