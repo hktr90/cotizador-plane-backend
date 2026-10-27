@@ -1,9 +1,11 @@
 import os
 import json
+import asyncio
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = FastAPI(title="Cotizador PLANÉ API")
 
@@ -22,36 +24,16 @@ SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-
-def obtener_modelo_valido():
-    """Instancia el modelo actualizado gemini-3.8-flash con fallbacks"""
-    candidatos = [
-        'gemini-3.8-flash',
-        'models/gemini-3.8-flash',
-        'gemini-1.5-flash',
-        'models/gemini-1.5-flash',
-        'gemini-pro'
-    ]
-    
-    for name in candidatos:
-        try:
-            return genai.GenerativeModel(name)
-        except Exception as e:
-            print(f"No se pudo cargar modelo {name}: {e}")
-
-    raise Exception("No se encontró ningún modelo de Gemini disponible con la API Key configurada.")
+client_ai = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Backend PLANÉ Activo"}
+    return {"status": "ok", "message": "Backend PLANÉ con SDK Actualizada"}
 
 
 # ------------------------------------------------------------------
-# 1. RUTA PRINCIPAL DE BÚSQUEDA DEL FRONTEND (GET /api/buscar-productos)
+# 1. BUSCADOR INTELIGENTE Y COTIZADOR (GET /api/buscar-productos)
 # ------------------------------------------------------------------
 @app.get("/api/buscar-productos")
 async def buscar_productos(query: str = Query("")):
@@ -62,7 +44,7 @@ async def buscar_productos(query: str = Query("")):
         if not supabase:
             raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
-        # Consultar inventario disponible en la base de datos
+        # Obtener productos del inventario
         res = supabase.table("productos_inventario").select("*").execute()
         raw_inventario = res.data or []
 
@@ -73,64 +55,73 @@ async def buscar_productos(query: str = Query("")):
                 "items": []
             }
 
-        # Filtrar campos estrictamente necesarios para acelerar la respuesta de la IA
-        inventario_resumido = []
+        # Filtrar únicamente campos indispensables para respuesta ultra rápida
+        inventario_optimizado = []
         for p in raw_inventario:
             precio = p.get("precio_unitario") or p.get("precio_base") or 0.0
-            prov_id = p.get("id_proveedor") or p.get("proveedor_id") or ""
-
             if precio > 0 and p.get("nombre_producto"):
-                inventario_resumido.append({
+                inventario_optimizado.append({
                     "id": str(p.get("id")),
                     "nombre": str(p.get("nombre_producto")),
                     "precio": float(precio)
                 })
 
-        if not inventario_resumido:
+        if not inventario_optimizado:
             return {
                 "exito": False,
-                "mensaje": "No hay productos con precio válido en la base de datos.",
+                "mensaje": "No hay productos con precio válido.",
                 "items": []
             }
 
         prompt_sistema = f"""
         Eres el Agente Comprador de PLANÉ (eventos B2B).
-        SOLICITUD: "{query}"
-        INVENTARIO DISPONIBLE: {json.dumps(inventario_resumido, ensure_ascii=False)}
+        SOLICITUD CLIENTE: "{query}"
+        INVENTARIO DISPONIBLE: {json.dumps(inventario_optimizado, ensure_ascii=False)}
 
         INSTRUCCIONES:
         1. Selecciona los ítems que respondan a la solicitud.
         2. Calcula subtotales (cantidad * precio).
-        3. Responde ÚNICAMENTE en JSON válido con este formato exacto (sin marcas markdown ```json):
+        3. Responde ÚNICAMENTE en JSON válido con esta estructura (sin formato Markdown):
 
         {{
             "items_seleccionados": [
                 {{
                     "id_producto": "ID",
-                    "nombre_producto": "Nombre del producto",
+                    "nombre_producto": "Nombre exacto",
                     "proveedor": "Proveedor PLANÉ",
                     "cantidad_sugerida": 10,
                     "precio_unitario": 45.00,
                     "subtotal": 450.00,
-                    "nota_justificacion": "Explicación breve"
+                    "nota_justificacion": "Razón breve de selección"
                 }}
             ],
-            "resumen_agente": "Resumen ejecutivo de la propuesta"
+            "resumen_agente": "Propuesta rápida"
         }}
         """
 
-        model = obtener_modelo_valido()
-        
-        # Generación ultrarrápida con temperatura baja y límites de tiempo
-        response = model.generate_content(
-            prompt_sistema,
-            generation_config={"temperature": 0.1, "max_output_tokens": 800},
-            request_options={"timeout": 12.0}
+        if not client_ai:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
+
+        # Invocación no bloqueante con timeout estricto de 8 segundos
+        loop = asyncio.get_event_loop()
+        response = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: client_ai.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt_sistema,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=600
+                    )
+                )
+            ),
+            timeout=8.0
         )
-        
+
         texto_respuesta = response.text.strip()
 
-        # Limpiar formato Markdown
+        # Limpiar etiquetas markdown si existen
         if texto_respuesta.startswith("```json"):
             texto_respuesta = texto_respuesta.replace("```json", "", 1)
         if texto_respuesta.startswith("```"):
@@ -140,6 +131,9 @@ async def buscar_productos(query: str = Query("")):
 
         return {"exito": True, "datos": json.loads(texto_respuesta.strip())}
 
+    except asyncio.TimeoutError:
+        print("Timeout consultando Gemini")
+        raise HTTPException(status_code=504, detail="El tiempo de respuesta de la IA excedió el límite.")
     except Exception as e:
         print(f"Error en motor Gemini: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error procesando cotización: {str(e)}")
