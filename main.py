@@ -62,7 +62,7 @@ async def buscar_productos(query: str = Query("")):
         if not supabase:
             raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
-        # Obtener productos del inventario
+        # Consultar inventario disponible en la base de datos
         res = supabase.table("productos_inventario").select("*").execute()
         raw_inventario = res.data or []
 
@@ -73,31 +73,35 @@ async def buscar_productos(query: str = Query("")):
                 "items": []
             }
 
-        inventario_limpio = []
+        # Filtrar campos estrictamente necesarios para acelerar la respuesta de la IA
+        inventario_resumido = []
         for p in raw_inventario:
             precio = p.get("precio_unitario") or p.get("precio_base") or 0.0
             prov_id = p.get("id_proveedor") or p.get("proveedor_id") or ""
 
             if precio > 0 and p.get("nombre_producto"):
-                inventario_limpio.append({
-                    "id_producto": str(p.get("id")),
-                    "id_proveedor": str(prov_id),
-                    "nombre_producto": str(p.get("nombre_producto")),
-                    "categoria": p.get("categoria") or "General",
-                    "precio_unitario": float(precio),
-                    "stock_disponible": p.get("stock_disponible") or p.get("stock") or 100,
-                    "descripcion": p.get("descripcion") or p.get("nombre_producto")
+                inventario_resumido.append({
+                    "id": str(p.get("id")),
+                    "nombre": str(p.get("nombre_producto")),
+                    "precio": float(precio)
                 })
 
+        if not inventario_resumido:
+            return {
+                "exito": False,
+                "mensaje": "No hay productos con precio válido en la base de datos.",
+                "items": []
+            }
+
         prompt_sistema = f"""
-        Eres el Agente Comprador Inteligente de PLANÉ (plataforma B2B para eventos).
-        SOLICITUD DEL CLIENTE: "{query}"
-        INVENTARIO DISPONIBLE EN BD: {json.dumps(inventario_limpio, ensure_ascii=False)}
+        Eres el Agente Comprador de PLANÉ (eventos B2B).
+        SOLICITUD: "{query}"
+        INVENTARIO DISPONIBLE: {json.dumps(inventario_resumido, ensure_ascii=False)}
 
         INSTRUCCIONES:
-        1. Identifica en el inventario los productos que respondan a la solicitud del cliente.
-        2. Multiplica cantidad por precio_unitario para obtener subtotales.
-        3. Responde ÚNICAMENTE en formato JSON válido (sin etiquetas markdown ```json):
+        1. Selecciona los ítems que respondan a la solicitud.
+        2. Calcula subtotales (cantidad * precio).
+        3. Responde ÚNICAMENTE en JSON válido con este formato exacto (sin marcas markdown ```json):
 
         {{
             "items_seleccionados": [
@@ -106,19 +110,27 @@ async def buscar_productos(query: str = Query("")):
                     "nombre_producto": "Nombre del producto",
                     "proveedor": "Proveedor PLANÉ",
                     "cantidad_sugerida": 10,
-                    "precio_unitario": 250.00,
-                    "subtotal": 2500.00,
-                    "nota_justificacion": "Razón de selección"
+                    "precio_unitario": 45.00,
+                    "subtotal": 450.00,
+                    "nota_justificacion": "Explicación breve"
                 }}
             ],
-            "resumen_agente": "Explicación breve de la propuesta"
+            "resumen_agente": "Resumen ejecutivo de la propuesta"
         }}
         """
 
         model = obtener_modelo_valido()
-        response = model.generate_content(prompt_sistema)
+        
+        # Generación ultrarrápida con temperatura baja y límites de tiempo
+        response = model.generate_content(
+            prompt_sistema,
+            generation_config={"temperature": 0.1, "max_output_tokens": 800},
+            request_options={"timeout": 12.0}
+        )
+        
         texto_respuesta = response.text.strip()
 
+        # Limpiar formato Markdown
         if texto_respuesta.startswith("```json"):
             texto_respuesta = texto_respuesta.replace("```json", "", 1)
         if texto_respuesta.startswith("```"):
