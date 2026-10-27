@@ -1,11 +1,9 @@
 import os
 import json
-import io
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 import google.generativeai as genai
-import pypdf
 
 app = FastAPI(title="Cotizador PLANÉ API")
 
@@ -28,23 +26,46 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def obtener_modelo_gemini():
-    """Intenta instanciar gemini-1.5-flash-latest y fallback a gemini-1.5-flash o gemini-pro"""
-    for nombre_modelo in ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro']:
+def obtener_modelo_valido():
+    """Busca dinámicamente el modelo Gemini activo que soporte generateContent"""
+    try:
+        # Intentar con los nombres estándar de la API v1beta
+        candidatos = [
+            'gemini-1.5-flash',
+            'models/gemini-1.5-flash',
+            'gemini-1.5-pro',
+            'models/gemini-1.5-pro',
+            'gemini-pro',
+            'models/gemini-pro'
+        ]
+        
+        # Consultar la lista oficial si la librería lo permite
+        models_list = list(genai.list_models())
+        for m in models_list:
+            if 'generateContent' in m.supported_generation_methods:
+                if 'flash' in m.name or 'pro' in m.name:
+                    return genai.GenerativeModel(m.name)
+    except Exception as e:
+        print(f"Advertencia listando modelos: {e}")
+
+    # Fallback directo
+    for name in candidatos:
         try:
-            return genai.GenerativeModel(nombre_modelo)
-        except Exception as e:
-            print(f"No se pudo cargar {nombre_modelo}: {e}")
-    raise Exception("No se pudo inicializar ningún modelo de Gemini.")
+            m = genai.GenerativeModel(name)
+            return m
+        except Exception:
+            continue
+
+    raise Exception("No se encontró ningún modelo Gemini disponible con esta API Key.")
 
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Backend PLANÉ con Inteligencia Activa"}
+    return {"status": "ok", "message": "Backend PLANÉ Activo"}
 
 
 # ------------------------------------------------------------------
-# 1. RUTA REQUERIDA POR EL FRONTEND: GET /api/buscar-productos
+# 1. RUTA PRINCIPAL DE BÚSQUEDA DEL FRONTEND (GET /api/buscar-productos)
 # ------------------------------------------------------------------
 @app.get("/api/buscar-productos")
 async def buscar_productos(query: str = Query("")):
@@ -53,9 +74,9 @@ async def buscar_productos(query: str = Query("")):
 
     try:
         if not supabase:
-            raise HTTPException(status_code=500, detail="Base de datos no conectada.")
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
-        # Consultar inventario disponible
+        # Obtener productos del inventario
         res = supabase.table("productos_inventario").select("*").execute()
         raw_inventario = res.data or []
 
@@ -89,9 +110,8 @@ async def buscar_productos(query: str = Query("")):
 
         INSTRUCCIONES:
         1. Identifica en el inventario los productos que respondan a la solicitud del cliente.
-        2. Si pide mobiliario o artículos para N personas, calcula las cantidades adecuadas.
-        3. Multiplica cantidad por precio_unitario para obtener subtotales.
-        4. Responde ÚNICAMENTE en formato JSON válido (sin etiquetas markdown ```json):
+        2. Multiplica cantidad por precio_unitario para obtener subtotales.
+        3. Responde ÚNICAMENTE en formato JSON válido (sin etiquetas markdown ```json):
 
         {{
             "items_seleccionados": [
@@ -109,7 +129,7 @@ async def buscar_productos(query: str = Query("")):
         }}
         """
 
-        model = obtener_modelo_gemini()
+        model = obtener_modelo_valido()
         response = model.generate_content(prompt_sistema)
         texto_respuesta = response.text.strip()
 
