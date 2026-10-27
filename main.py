@@ -1,5 +1,112 @@
+import os
+import json
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client, Client
+import google.generativeai as genai
+
+# 1. INICIALIZAR LA APLICACIÓN (Debe ir antes de cualquier @app)
+app = FastAPI(title="Cotizador PLANÉ API")
+
+# Habilitar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configuración de Clientes
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "Backend de PLANÉ Activo y Sincronizado"}
+
+
 # ------------------------------------------------------------------
-# MOTOR DE COTIZACIÓN CON GEMINI AI (Normalizado para leer precio_base y proveedor_id)
+# 1. CARGA DE CATÁLOGOS
+# ------------------------------------------------------------------
+@app.post("/upload-catalog")
+@app.post("/api/subir-catalogo")
+async def subir_catalogo(
+    nombre_empresa: str = Form(""),
+    telefono: str = Form(""),
+    correo: str = Form(""),
+    archivo: UploadFile = File(None)
+):
+    try:
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
+
+        nombre_prov = nombre_empresa if nombre_empresa.strip() else "Proveedor General"
+        
+        res_prov = supabase.table("proveedores").insert({
+            "nombre_proveedor": nombre_prov,
+            "telefono": telefono,
+            "correo": correo
+        }).execute()
+
+        if not res_prov.data:
+            raise HTTPException(status_code=500, detail="No se pudo registrar el proveedor.")
+
+        id_proveedor = res_prov.data[0]["id"]
+        nombre_archivo = archivo.filename if archivo else "catalogo.pdf"
+
+        supabase.table("catalogos_archivos").insert({
+            "id_proveedor": id_proveedor,
+            "nombre_archivo": nombre_archivo
+        }).execute()
+
+        return {
+            "exito": True,
+            "mensaje": f"Catálogo '{nombre_archivo}' subido exitosamente.",
+            "id_proveedor": id_proveedor
+        }
+
+    except Exception as e:
+        print(f"Error procesando catálogo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en el servidor: {str(e)}")
+
+
+# ------------------------------------------------------------------
+# 2. CONSULTA DE PROVEEDORES
+# ------------------------------------------------------------------
+@app.get("/api/proveedores")
+@app.get("/proveedores")
+async def obtener_proveedores():
+    try:
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
+
+        res = supabase.table("proveedores").select("*").execute()
+        
+        proveedores_limpios = []
+        for p in res.data:
+            nombre = p.get("nombre_proveedor") or p.get("nombre") or "Proveedor sin nombre"
+            proveedores_limpios.append({
+                "id": p.get("id"),
+                "nombre_proveedor": nombre,
+                "nombre": nombre,
+                "telefono": p.get("telefono") or "",
+                "correo": p.get("correo") or ""
+            })
+
+        return {"exito": True, "proveedores": proveedores_limpios}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al consultar proveedores: {str(e)}")
+
+
+# ------------------------------------------------------------------
+# 3. MOTOR DE COTIZACIÓN CON GEMINI AI
 # ------------------------------------------------------------------
 @app.post("/api/buscar-cotizacion-inteligente")
 async def buscar_cotizacion_inteligente(payload: dict):
@@ -11,27 +118,21 @@ async def buscar_cotizacion_inteligente(payload: dict):
         if not supabase:
             raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
-        # 1. Obtener todo el inventario
         res = supabase.table("productos_inventario").select("*").execute()
         raw_inventario = res.data or []
 
         if not raw_inventario:
             return {
                 "exito": False,
-                "mensaje": "El inventario está vacío. Suba un catálogo primero.",
+                "mensaje": "El inventario está vacío.",
                 "items": []
             }
 
-        # 2. HOMOGENIZAR DATOS (Resuelve el problema del CSV)
         inventario_limpio = []
         for p in raw_inventario:
-            # Obtener el precio correcto (prioriza precio_unitario, luego precio_base)
             precio = p.get("precio_unitario") or p.get("precio_base") or 0.0
-            
-            # Obtener el ID de proveedor correcto
             prov_id = p.get("id_proveedor") or p.get("proveedor_id") or ""
 
-            # Solo incluir si el producto tiene un precio válido > 0 y un nombre con sentido
             if precio > 0 and p.get("nombre_producto"):
                 inventario_limpio.append({
                     "id_producto": str(p.get("id")),
@@ -46,13 +147,12 @@ async def buscar_cotizacion_inteligente(payload: dict):
         prompt_sistema = f"""
         Eres el Agente Comprador Inteligente de PLANÉ (plataforma B2B de eventos).
         SOLICITUD DEL CLIENTE: "{solicitud_usuario}"
-        INVENTARIO DISPONIBLE (Limpio): {json.dumps(inventario_limpio, ensure_ascii=False)}
+        INVENTARIO DISPONIBLE: {json.dumps(inventario_limpio, ensure_ascii=False)}
 
         INSTRUCCIONES:
-        1. Selecciona los ítems del inventario que coincidan con la solicitud (por ejemplo mesas, sillas, etc.).
-        2. Si la solicitud pide N personas, calcula la cantidad de mesas y sillas necesarias.
-        3. Calcula subtotales (cantidad * precio_unitario).
-        4. Responde ÚNICAMENTE con un JSON válido con la siguiente estructura (sin formato Markdown ```json):
+        1. Selecciona los ítems del inventario que coincidan con la solicitud.
+        2. Calcula subtotales (cantidad * precio_unitario).
+        3. Responde ÚNICAMENTE con un JSON válido con la siguiente estructura (sin formato Markdown ```json):
 
         {{
             "items_seleccionados": [
@@ -74,7 +174,6 @@ async def buscar_cotizacion_inteligente(payload: dict):
         response = model.generate_content(prompt_sistema)
         texto_respuesta = response.text.strip()
 
-        # Limpiar formato Markdown
         if texto_respuesta.startswith("```json"):
             texto_respuesta = texto_respuesta.replace("```json", "", 1)
         if texto_respuesta.startswith("```"):
