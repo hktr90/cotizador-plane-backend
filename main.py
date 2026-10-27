@@ -7,7 +7,7 @@ import google.generativeai as genai
 
 app = FastAPI(title="Cotizador PLANÉ API")
 
-# Configurar CORS habilitando todos los orígenes
+# Habilitar CORS completo para Netlify
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,12 +16,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inicializar Supabase
+# Configuración de Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-# Configurar Gemini API Key
+# Configuración de Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -29,11 +29,11 @@ if GEMINI_API_KEY:
 
 @app.get("/")
 def home():
-    return {"message": "API Cotizador PLANÉ funcionando correctamente"}
+    return {"status": "ok", "message": "Backend de PLANÉ activo"}
 
 
 # ------------------------------------------------------------------
-# RUTA DE CARGA DE CATÁLOGOS (Acepta /upload-catalog y /api/subir-catalogo)
+# SUBIDA DE CATÁLOGOS (Acepta ambas rutas para evitar errores 404)
 # ------------------------------------------------------------------
 @app.post("/upload-catalog")
 @app.post("/api/subir-catalogo")
@@ -45,19 +45,19 @@ async def subir_catalogo(
 ):
     try:
         if not supabase:
-            raise HTTPException(status_code=500, detail="Base de datos Supabase no configurada.")
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
-        # Registrar el proveedor en la tabla 'proveedores'
+        # 1. Registrar o actualizar proveedor
         res_proveedor = supabase.table("proveedores").insert({
-            "nombre_proveedor": nombre_empresa if nombre_empresa else "Proveedor General",
+            "nombre_proveedor": nombre_empresa if nombre_empresa else "Proveedor Sin Nombre",
             "telefono": telefono,
             "correo": correo
         }).execute()
 
         id_proveedor = res_proveedor.data[0]["id"] if res_proveedor.data else None
-        nombre_archivo = archivo.filename if archivo else "catalogo_sin_nombre"
+        nombre_archivo = archivo.filename if archivo else "catalogo_sin_nombre.pdf"
 
-        # Registrar la referencia del catálogo en 'catalogos_archivos'
+        # 2. Registrar el archivo en la BD
         supabase.table("catalogos_archivos").insert({
             "id_proveedor": id_proveedor,
             "nombre_archivo": nombre_archivo
@@ -65,33 +65,33 @@ async def subir_catalogo(
 
         return {
             "exito": True,
-            "mensaje": f"Catálogo '{nombre_archivo}' registrado correctamente para {nombre_empresa}.",
+            "mensaje": f"Catálogo '{nombre_archivo}' subido con éxito para {nombre_empresa}.",
             "id_proveedor": id_proveedor
         }
 
     except Exception as e:
         print(f"Error procesando catálogo: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en servidor: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en el servidor: {str(e)}")
 
 
 # ------------------------------------------------------------------
-# RUTA CONSULTA DE PROVEEDORES
+# CONSULTA DE PROVEEDORES
 # ------------------------------------------------------------------
 @app.get("/api/proveedores")
 @app.get("/proveedores")
 async def obtener_proveedores():
     try:
         if not supabase:
-            raise HTTPException(status_code=500, detail="Base de datos Supabase no configurada.")
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
         res = supabase.table("proveedores").select("*").execute()
         return {"exito": True, "proveedores": res.data}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en servidor: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al consultar proveedores: {str(e)}")
 
 
 # ------------------------------------------------------------------
-# RUTA BÚSQUEDA INTELIGENTE CON GEMINI
+# MOTOR DE COTIZACIÓN INTELEGENTE (GEMINI)
 # ------------------------------------------------------------------
 @app.post("/api/buscar-cotizacion-inteligente")
 async def buscar_cotizacion_inteligente(payload: dict):
@@ -101,7 +101,7 @@ async def buscar_cotizacion_inteligente(payload: dict):
 
     try:
         if not supabase:
-            raise HTTPException(status_code=500, detail="Base de datos Supabase no configurada.")
+            raise HTTPException(status_code=500, detail="Base de datos Supabase no conectada.")
 
         res = supabase.table("productos_inventario").select("*, proveedores(nombre_proveedor)").execute()
         inventario_disponible = res.data
@@ -109,40 +109,29 @@ async def buscar_cotizacion_inteligente(payload: dict):
         if not inventario_disponible:
             return {
                 "exito": False,
-                "mensaje": "No hay productos registrados en el inventario de Supabase.",
+                "mensaje": "No hay productos registrados en el inventario.",
                 "items": []
             }
 
         prompt_sistema = f"""
-        Eres el Agente Comprador y Cotizador Experto para PLANÉ (empresa de eventos B2B).
-        
-        SOLICITUD DEL CLIENTE:
-        "{solicitud_usuario}"
+        Eres el Agente Comprador de PLANÉ (empresa de eventos B2B).
+        SOLICITUD: "{solicitud_usuario}"
+        INVENTARIO: {json.dumps(inventario_disponible, ensure_ascii=False)}
 
-        INVENTARIO DISPONIBLE DE PROVEEDORES (JSON):
-        {json.dumps(inventario_disponible, ensure_ascii=False)}
-
-        INSTRUCCIONES DE SELECCIÓN Y JUICIO:
-        1. Analiza el requerimiento del cliente (número de personas, tipo de evento, estilo, materiales).
-        2. Deduce la cantidad lógica necesaria si el usuario no especifica exactamente.
-        3. Busca coincidencias exactas o los mejores sustitutos por color, textura o material.
-        4. Agrupa en lo posible con los mismos proveedores para minimizar costos de flete.
-        
-        FORMATO DE RESPUESTA REQUERIDO:
-        Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin marcas de markdown) con esta estructura:
+        Devuelve UNICAMENTE un JSON válido (sin formato markdown):
         {{
             "items_seleccionados": [
                 {{
                     "id_producto": 123,
-                    "nombre_producto": "Nombre del producto",
-                    "proveedor": "Nombre del Proveedor",
+                    "nombre_producto": "Nombre",
+                    "proveedor": "Proveedor",
                     "cantidad_sugerida": 10,
-                    "precio_unitario": 150.00,
-                    "subtotal": 1500.00,
-                    "nota_justificacion": "Explicación breve de por qué se eligió este producto"
+                    "precio_unitario": 100.00,
+                    "subtotal": 1000.00,
+                    "nota_justificacion": "Explicación de selección"
                 }}
             ],
-            "resumen_agente": "Explicación ejecutiva de la propuesta para PLANÉ."
+            "resumen_agente": "Explicación ejecutiva"
         }}
         """
 
@@ -155,13 +144,7 @@ async def buscar_cotizacion_inteligente(payload: dict):
         if texto_respuesta.endswith("```"):
             texto_respuesta = texto_respuesta[:-3]
 
-        resultado_json = json.loads(texto_respuesta.strip())
-
-        return {
-            "exito": True,
-            "datos": resultado_json
-        }
+        return {"exito": True, "datos": json.loads(texto_respuesta.strip())}
 
     except Exception as e:
-        print(f"Error en motor de cotización: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en motor de cotización: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en motor Gemini: {str(e)}")
