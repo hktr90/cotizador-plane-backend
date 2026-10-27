@@ -27,36 +27,22 @@ if GEMINI_API_KEY:
 
 
 def obtener_modelo_valido():
-    """Busca dinámicamente el modelo Gemini activo que soporte generateContent"""
-    try:
-        # Intentar con los nombres estándar de la API v1beta
-        candidatos = [
-            'gemini-1.5-flash',
-            'models/gemini-1.5-flash',
-            'gemini-1.5-pro',
-            'models/gemini-1.5-pro',
-            'gemini-pro',
-            'models/gemini-pro'
-        ]
-        
-        # Consultar la lista oficial si la librería lo permite
-        models_list = list(genai.list_models())
-        for m in models_list:
-            if 'generateContent' in m.supported_generation_methods:
-                if 'flash' in m.name or 'pro' in m.name:
-                    return genai.GenerativeModel(m.name)
-    except Exception as e:
-        print(f"Advertencia listando modelos: {e}")
-
-    # Fallback directo
+    """Instancia el modelo actualizado gemini-3.8-flash con fallbacks"""
+    candidatos = [
+        'gemini-3.8-flash',
+        'models/gemini-3.8-flash',
+        'gemini-1.5-flash',
+        'models/gemini-1.5-flash',
+        'gemini-pro'
+    ]
+    
     for name in candidatos:
         try:
-            m = genai.GenerativeModel(name)
-            return m
-        except Exception:
-            continue
+            return genai.GenerativeModel(name)
+        except Exception as e:
+            print(f"No se pudo cargar modelo {name}: {e}")
 
-    raise Exception("No se encontró ningún modelo Gemini disponible con esta API Key.")
+    raise Exception("No se encontró ningún modelo de Gemini disponible con la API Key configurada.")
 
 
 @app.get("/")
