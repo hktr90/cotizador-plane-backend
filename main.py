@@ -28,6 +28,16 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
+def obtener_modelo_gemini():
+    """Intenta instanciar gemini-1.5-flash-latest y fallback a gemini-1.5-flash o gemini-pro"""
+    for nombre_modelo in ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro']:
+        try:
+            return genai.GenerativeModel(nombre_modelo)
+        except Exception as e:
+            print(f"No se pudo cargar {nombre_modelo}: {e}")
+    raise Exception("No se pudo inicializar ningún modelo de Gemini.")
+
+
 @app.get("/")
 def home():
     return {"status": "ok", "message": "Backend PLANÉ con Inteligencia Activa"}
@@ -99,7 +109,7 @@ async def buscar_productos(query: str = Query("")):
         }}
         """
 
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = obtener_modelo_gemini()
         response = model.generate_content(prompt_sistema)
         texto_respuesta = response.text.strip()
 
